@@ -1,11 +1,15 @@
-name: 'Your name here'
-description: 'Provide a description here'
-author: 'Your name or organization here'
+name: 'Epoch Time Comments'
+description: 'Comment the time in human readable format for PRs with epoch timers'
+author: 'Duinhil'
 inputs:
-  milliseconds: # change this
-    required: true
-    description: 'input description here'
-    default: 'default value if applicable'
+  GITHUB_TOKEN:
+    description: 'Github token of the repository (automatically created by Github)'
+    default: ${{ github.token }}
+    required: false
+  minEpoch:
+    description: 'The minimum number that will be identified as an epoch time for comments'
+    default: 0
+    required: false
 runs:
   using: 'node16'
   main: 'dist/index.js'
