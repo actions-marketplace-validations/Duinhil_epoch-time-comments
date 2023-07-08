@@ -149,7 +149,80 @@ function processPR(githubToken, minEpoch) {
                 }
                 finally { if (e_1) throw e_1.error; }
             }
+            const reviewThreads = yield getAllReviewThreadList(octokit, context.payload.pull_request.number);
+            core.debug(JSON.stringify(reviewThreads));
+            const threadsToDelete = reviewThreads.filter(reviewThread => {
+                const allCommentsAreActionBot = reviewThread.node.comments.edges.every(edge => edge.node.author.login === 'github-actions');
+                return reviewThread.node.isOutdated && allCommentsAreActionBot;
+            });
+            core.debug(JSON.stringify(threadsToDelete));
+            for (const thread of threadsToDelete) {
+                for (const comment of thread.node.comments.edges) {
+                    core.debug(`Deleting review comment ${comment.node.id}`);
+                    yield octokit.rest.pulls.deleteReviewComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        comment_id: comment.node.id
+                    });
+                }
+            }
         }
+    });
+}
+function getAllReviewThreadList(octokit, pullNumber) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { edges: reviewThreads, page_info } = yield getReviewThreadList(octokit, pullNumber, null);
+        if (page_info.hasNextPage) {
+            const res = yield getReviewThreadList(octokit, pullNumber, page_info.endCursor);
+            return [...reviewThreads, ...res.edges];
+        }
+        return reviewThreads;
+    });
+}
+function getReviewThreadList(octokit, pullNumber, cursor) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const query = `
+    query GetReviewThreadList($repo_owner:String!, $repo_name:String!, $pull_request_number:Int!, $next_cursor:String){
+      repository(owner:$repo_owner, name:$repo_name) {
+        id
+        pullRequest(number:$pull_request_number) {
+          id
+          reviewThreads(first:100, after: $next_cursor) {
+            pageInfo{
+              hasNextPage
+              endCursor
+            }
+            edges {
+              node {
+                comments(first:2){
+                  edges{
+                    node{
+                      id
+                      author{
+                        login
+                      }
+                    }
+                  }
+                }
+                isOutdated
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+        const parameter = {
+            repo_owner: github.context.repo.owner,
+            repo_name: github.context.repo.repo,
+            pull_request_number: pullNumber,
+            next_cursor: cursor
+        };
+        const result = yield octokit.graphql(query, parameter);
+        return {
+            edges: result.repository.pullRequest.reviewThreads.edges,
+            page_info: result.repository.pullRequest.reviewThreads.pageInfo
+        };
     });
 }
 run();

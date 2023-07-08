@@ -1,5 +1,6 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
+import {GitHub} from '@actions/github/lib/utils'
 
 async function run(): Promise<void> {
   try {
@@ -86,6 +87,136 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
         }
       }
     }
+
+    const reviewThreads = await getAllReviewThreadList(
+      octokit,
+      context.payload.pull_request.number
+    )
+    core.debug(JSON.stringify(reviewThreads))
+    const threadsToDelete = reviewThreads.filter(reviewThread => {
+      const allCommentsAreActionBot = reviewThread.node.comments.edges.every(
+        edge => edge.node.author.login === 'github-actions'
+      )
+      return reviewThread.node.isOutdated && allCommentsAreActionBot
+    })
+    core.debug(JSON.stringify(threadsToDelete))
+
+    for (const thread of threadsToDelete) {
+      for (const comment of thread.node.comments.edges) {
+        core.debug(`Deleting review comment ${comment.node.id}`)
+        await octokit.rest.pulls.deleteReviewComment({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          comment_id: comment.node.id
+        })
+      }
+    }
+  }
+}
+
+async function getAllReviewThreadList(
+  octokit: InstanceType<typeof GitHub>,
+  pullNumber: number
+): Promise<ReviewThreadEdge[]> {
+  const {edges: reviewThreads, page_info} = await getReviewThreadList(
+    octokit,
+    pullNumber,
+    null
+  )
+  if (page_info.hasNextPage) {
+    const res = await getReviewThreadList(
+      octokit,
+      pullNumber,
+      page_info.endCursor
+    )
+    return [...reviewThreads, ...res.edges]
+  }
+
+  return reviewThreads
+}
+
+type PageInfo = {
+  endCursor: string
+  hasNextPage: boolean
+}
+
+type ReviewThreadEdge = {
+  node: {
+    comments: {
+      edges: [
+        {
+          node: {
+            id: number
+            author: {
+              login: string
+            }
+          }
+        }
+      ]
+    }
+    isOutdated: boolean
+  }
+}
+
+async function getReviewThreadList(
+  octokit: InstanceType<typeof GitHub>,
+  pullNumber: number,
+  cursor: string | null
+): Promise<{edges: ReviewThreadEdge[]; page_info: PageInfo}> {
+  const query = `
+    query GetReviewThreadList($repo_owner:String!, $repo_name:String!, $pull_request_number:Int!, $next_cursor:String){
+      repository(owner:$repo_owner, name:$repo_name) {
+        id
+        pullRequest(number:$pull_request_number) {
+          id
+          reviewThreads(first:100, after: $next_cursor) {
+            pageInfo{
+              hasNextPage
+              endCursor
+            }
+            edges {
+              node {
+                comments(first:2){
+                  edges{
+                    node{
+                      id
+                      author{
+                        login
+                      }
+                    }
+                  }
+                }
+                isOutdated
+              }
+            }
+          }
+        }
+      }
+    }
+  `
+
+  type ReviewThreadsResponse = {
+    repository: {
+      pullRequest: {
+        reviewThreads: {
+          pageInfo: PageInfo
+          edges: ReviewThreadEdge[]
+        }
+      }
+    }
+  }
+
+  const parameter = {
+    repo_owner: github.context.repo.owner,
+    repo_name: github.context.repo.repo,
+    pull_request_number: pullNumber,
+    next_cursor: cursor
+  }
+
+  const result: ReviewThreadsResponse = await octokit.graphql(query, parameter)
+  return {
+    edges: result.repository.pullRequest.reviewThreads.edges,
+    page_info: result.repository.pullRequest.reviewThreads.pageInfo
   }
 }
 
