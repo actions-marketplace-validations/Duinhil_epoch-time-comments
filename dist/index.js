@@ -82,6 +82,7 @@ function processPR(githubToken, minEpoch) {
             return match;
         }
         if (context.payload.pull_request) {
+            yield deleteThreads(octokit, context, filterThreadsFromAuthor, { author: 'github-actions' });
             const commits = yield octokit.paginate(octokit.rest.pulls.listCommits, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -149,25 +150,38 @@ function processPR(githubToken, minEpoch) {
                 }
                 finally { if (e_1) throw e_1.error; }
             }
+            yield deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, { author: 'github-actions' });
+        }
+    });
+}
+function deleteThreads(octokit, context, filterFunction, params) {
+    return __awaiter(this, void 0, void 0, function* () {
+        if (context.payload.pull_request) {
             const reviewThreads = yield getAllReviewThreadList(octokit, context.payload.pull_request.number);
             core.debug(JSON.stringify(reviewThreads));
-            const threadsToDelete = reviewThreads.filter(reviewThread => {
-                const allCommentsAreActionBot = reviewThread.node.comments.edges.every(edge => edge.node.author.login === 'github-actions');
-                return reviewThread.node.isOutdated && allCommentsAreActionBot;
-            });
+            const threadsToDelete = reviewThreads.filter(reviewThread => filterFunction(reviewThread, params));
             core.debug(JSON.stringify(threadsToDelete));
+            const promises = [];
             for (const thread of threadsToDelete) {
                 for (const comment of thread.node.comments.edges) {
                     core.debug(`Deleting review comment ${comment.node.databaseId}`);
-                    yield octokit.rest.pulls.deleteReviewComment({
+                    promises.push(octokit.rest.pulls.deleteReviewComment({
                         owner: context.repo.owner,
                         repo: context.repo.repo,
                         comment_id: comment.node.databaseId
-                    });
+                    }));
                 }
             }
+            yield Promise.all(promises);
         }
     });
+}
+function filterThreadsFromAuthor(reviewThread, params) {
+    return reviewThread.node.comments.edges.every(edge => edge.node.author.login === params.author);
+}
+function filterOutdatedThreadsFromAuthor(reviewThread, params) {
+    return (reviewThread.node.isOutdated &&
+        filterThreadsFromAuthor(reviewThread, { author: params.author }));
 }
 function getAllReviewThreadList(octokit, pullNumber) {
     return __awaiter(this, void 0, void 0, function* () {

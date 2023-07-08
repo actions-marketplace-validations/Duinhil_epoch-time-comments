@@ -1,5 +1,6 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
+import {Context} from '@actions/github/lib/context'
 import {GitHub} from '@actions/github/lib/utils'
 
 async function run(): Promise<void> {
@@ -32,6 +33,10 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
   }
 
   if (context.payload.pull_request) {
+    await deleteThreads(octokit, context, filterThreadsFromAuthor, {
+      author: 'github-actions'
+    })
+
     const commits = await octokit.paginate(
       octokit.rest.pulls.listCommits,
       {
@@ -87,31 +92,66 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
         }
       }
     }
+    await deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, {
+      author: 'github-actions'
+    })
+  }
+}
 
+async function deleteThreads(
+  octokit: InstanceType<typeof GitHub>,
+  context: Context,
+  filterFunction: (
+    reviewThread: ReviewThreadEdge,
+    filterParams: FilterThreadParams
+  ) => boolean,
+  params: FilterThreadParams
+): Promise<void> {
+  if (context.payload.pull_request) {
     const reviewThreads = await getAllReviewThreadList(
       octokit,
       context.payload.pull_request.number
     )
     core.debug(JSON.stringify(reviewThreads))
-    const threadsToDelete = reviewThreads.filter(reviewThread => {
-      const allCommentsAreActionBot = reviewThread.node.comments.edges.every(
-        edge => edge.node.author.login === 'github-actions'
-      )
-      return reviewThread.node.isOutdated && allCommentsAreActionBot
-    })
+    const threadsToDelete = reviewThreads.filter(reviewThread =>
+      filterFunction(reviewThread, params)
+    )
     core.debug(JSON.stringify(threadsToDelete))
 
+    const promises = []
     for (const thread of threadsToDelete) {
       for (const comment of thread.node.comments.edges) {
         core.debug(`Deleting review comment ${comment.node.databaseId}`)
-        await octokit.rest.pulls.deleteReviewComment({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          comment_id: comment.node.databaseId
-        })
+        promises.push(
+          octokit.rest.pulls.deleteReviewComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            comment_id: comment.node.databaseId
+          })
+        )
       }
     }
+    await Promise.all(promises)
   }
+}
+
+function filterThreadsFromAuthor(
+  reviewThread: ReviewThreadEdge,
+  params: FilterThreadParams
+): boolean {
+  return reviewThread.node.comments.edges.every(
+    edge => edge.node.author.login === params.author
+  )
+}
+
+function filterOutdatedThreadsFromAuthor(
+  reviewThread: ReviewThreadEdge,
+  params: FilterThreadParams
+): boolean {
+  return (
+    reviewThread.node.isOutdated &&
+    filterThreadsFromAuthor(reviewThread, {author: params.author})
+  )
 }
 
 async function getAllReviewThreadList(
@@ -133,6 +173,10 @@ async function getAllReviewThreadList(
   }
 
   return reviewThreads
+}
+
+type FilterThreadParams = {
+  author: string
 }
 
 type PageInfo = {
