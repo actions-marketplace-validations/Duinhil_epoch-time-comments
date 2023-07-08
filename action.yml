@@ -1,6 +1,9 @@
 name: 'Epoch Time Comments'
 description: 'Comment the time in human readable format for PRs with epoch timers'
 author: 'Duinhil'
+branding:
+  icon: 'check'
+  color: 'gray-dark'
 inputs:
   GITHUB_TOKEN:
     description: 'Github token of the repository (automatically created by Github)'
