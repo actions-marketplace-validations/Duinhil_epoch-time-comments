@@ -15,6 +15,8 @@ jobs:
     permissions:
       # Required to be able to write comments on Pull Requests
       pull-requests: write
+      # Required to be able to read commit contents
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: Duinhil/epoch-time-comments@1.0
