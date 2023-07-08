@@ -38,13 +38,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __asyncValues = (this && this.__asyncValues) || function (o) {
-    if (!Symbol.asyncIterator) throw new TypeError("Symbol.asyncIterator is not defined.");
-    var m = o[Symbol.asyncIterator], i;
-    return m ? m.call(o) : (o = typeof __values === "function" ? __values(o) : o[Symbol.iterator](), i = {}, verb("next"), verb("throw"), verb("return"), i[Symbol.asyncIterator] = function () { return this; }, i);
-    function verb(n) { i[n] = o[n] && function (v) { return new Promise(function (resolve, reject) { v = o[n](v), settle(resolve, reject, v.done, v.value); }); }; }
-    function settle(resolve, reject, d, v) { Promise.resolve(v).then(function(v) { resolve({ value: v, done: d }); }, reject); }
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(2186));
 const github = __importStar(__nccwpck_require__(5438));
@@ -67,11 +60,21 @@ function run() {
     });
 }
 function processPR(githubToken, minEpoch) {
-    var _a, e_1, _b, _c;
-    var _d;
     return __awaiter(this, void 0, void 0, function* () {
         const context = github.context;
         const octokit = github.getOctokit(githubToken);
+        yield deleteThreads(octokit, context, filterThreadsFromAuthor, {
+            author: 'github-actions'
+        });
+        yield commentCommits(octokit, context, minEpoch);
+        yield deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, {
+            author: 'github-actions'
+        });
+    });
+}
+function commentCommits(octokit, context, minEpoch) {
+    var _a;
+    return __awaiter(this, void 0, void 0, function* () {
         function replaceEpochTimes(match) {
             const epoch = parseInt(match);
             if (epoch >= minEpoch) {
@@ -82,75 +85,58 @@ function processPR(githubToken, minEpoch) {
             return match;
         }
         if (context.payload.pull_request) {
-            yield deleteThreads(octokit, context, filterThreadsFromAuthor, { author: 'github-actions' });
-            const commits = yield octokit.paginate(octokit.rest.pulls.listCommits, {
+            const commitList = yield octokit.paginate(octokit.rest.pulls.listCommits, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: context.payload.pull_request.number
             }, response => response.data);
-            try {
-                for (var _e = true, commits_1 = __asyncValues(commits), commits_1_1; commits_1_1 = yield commits_1.next(), _a = commits_1_1.done, !_a;) {
-                    _c = commits_1_1.value;
-                    _e = false;
-                    try {
-                        const commit = _c;
-                        core.debug(`Processing ${commit.sha}`);
-                        const fullCommit = yield octokit.rest.repos.getCommit({
-                            owner: context.repo.owner,
-                            repo: context.repo.repo,
-                            ref: commit.sha
-                        });
-                        if (fullCommit.data.files) {
-                            for (const file of fullCommit.data.files) {
-                                core.debug(`Processing ${file.filename}`);
-                                const lines = (_d = file.patch) === null || _d === void 0 ? void 0 : _d.split(/\r\n|\r|\n/);
-                                if (lines) {
-                                    let rightLineNumber = 0;
-                                    for (const line of lines) {
-                                        core.debug(`Processing ${line}`);
-                                        const lineNumbers = line.match(/@@ -(\d+),\d+ \+(\d+),\d+ @@/);
-                                        if (lineNumbers) {
-                                            rightLineNumber = parseInt(lineNumbers[2]);
-                                        }
-                                        else if (line.startsWith('+')) {
-                                            let comment = line.replace(/\d+/g, replaceEpochTimes);
-                                            if (comment !== line) {
-                                                comment = comment.substring(1);
-                                                core.debug(`Posting review comment to ${file.filename} - RIGHT - ${rightLineNumber}`);
-                                                yield octokit.rest.pulls.createReviewComment({
-                                                    owner: context.repo.owner,
-                                                    repo: context.repo.repo,
-                                                    pull_number: context.payload.pull_request.number,
-                                                    body: comment,
-                                                    path: file.filename,
-                                                    line: rightLineNumber,
-                                                    side: 'RIGHT',
-                                                    commit_id: commit.sha
-                                                });
-                                            }
-                                            rightLineNumber++;
-                                        }
-                                        else if (!line.startsWith('-')) {
-                                            rightLineNumber++;
-                                        }
+            const rawCommits = yield Promise.all(commitList.map((commit) => __awaiter(this, void 0, void 0, function* () {
+                return octokit.rest.repos.getCommit({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: commit.sha
+                });
+            })));
+            const commits = rawCommits.map(rawCommit => rawCommit.data);
+            for (const commit of commits) {
+                if (commit.files) {
+                    for (const file of commit.files) {
+                        core.debug(`Processing ${file.filename}`);
+                        const lines = (_a = file.patch) === null || _a === void 0 ? void 0 : _a.split(/\r\n|\r|\n/);
+                        if (lines) {
+                            let rightLineNumber = 0;
+                            for (const line of lines) {
+                                core.debug(`Processing ${line}`);
+                                const lineNumbers = line.match(/@@ -(\d+),\d+ \+(\d+),\d+ @@/);
+                                if (lineNumbers) {
+                                    rightLineNumber = parseInt(lineNumbers[2]);
+                                }
+                                else if (line.startsWith('+')) {
+                                    let comment = line.replace(/\d+/g, replaceEpochTimes);
+                                    if (comment !== line) {
+                                        comment = comment.substring(1);
+                                        core.debug(`Posting review comment to ${file.filename} - RIGHT - ${rightLineNumber}`);
+                                        yield octokit.rest.pulls.createReviewComment({
+                                            owner: context.repo.owner,
+                                            repo: context.repo.repo,
+                                            pull_number: context.payload.pull_request.number,
+                                            body: comment,
+                                            path: file.filename,
+                                            line: rightLineNumber,
+                                            side: 'RIGHT',
+                                            commit_id: commit.sha
+                                        });
                                     }
+                                    rightLineNumber++;
+                                }
+                                else if (!line.startsWith('-')) {
+                                    rightLineNumber++;
                                 }
                             }
                         }
                     }
-                    finally {
-                        _e = true;
-                    }
                 }
             }
-            catch (e_1_1) { e_1 = { error: e_1_1 }; }
-            finally {
-                try {
-                    if (!_e && !_a && (_b = commits_1.return)) yield _b.call(commits_1);
-                }
-                finally { if (e_1) throw e_1.error; }
-            }
-            yield deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, { author: 'github-actions' });
         }
     });
 }

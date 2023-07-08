@@ -22,6 +22,23 @@ async function run(): Promise<void> {
 async function processPR(githubToken: string, minEpoch: number): Promise<void> {
   const context = github.context
   const octokit = github.getOctokit(githubToken)
+
+  await deleteThreads(octokit, context, filterThreadsFromAuthor, {
+    author: 'github-actions'
+  })
+
+  await commentCommits(octokit, context, minEpoch)
+
+  await deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, {
+    author: 'github-actions'
+  })
+}
+
+async function commentCommits(
+  octokit: InstanceType<typeof GitHub>,
+  context: Context,
+  minEpoch: number
+): Promise<void> {
   function replaceEpochTimes(match: string): string {
     const epoch = parseInt(match)
     if (epoch >= minEpoch) {
@@ -33,11 +50,7 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
   }
 
   if (context.payload.pull_request) {
-    await deleteThreads(octokit, context, filterThreadsFromAuthor, {
-      author: 'github-actions'
-    })
-
-    const commits = await octokit.paginate(
+    const commitList = await octokit.paginate(
       octokit.rest.pulls.listCommits,
       {
         owner: context.repo.owner,
@@ -46,16 +59,20 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
       },
       response => response.data
     )
+    const rawCommits = await Promise.all(
+      commitList.map(async commit =>
+        octokit.rest.repos.getCommit({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          ref: commit.sha
+        })
+      )
+    )
+    const commits = rawCommits.map(rawCommit => rawCommit.data)
 
-    for await (const commit of commits) {
-      core.debug(`Processing ${commit.sha}`)
-      const fullCommit = await octokit.rest.repos.getCommit({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        ref: commit.sha
-      })
-      if (fullCommit.data.files) {
-        for (const file of fullCommit.data.files) {
+    for (const commit of commits) {
+      if (commit.files) {
+        for (const file of commit.files) {
           core.debug(`Processing ${file.filename}`)
           const lines = file.patch?.split(/\r\n|\r|\n/)
           if (lines) {
@@ -92,9 +109,6 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
         }
       }
     }
-    await deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, {
-      author: 'github-actions'
-    })
   }
 }
 
