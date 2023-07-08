@@ -158,11 +158,11 @@ function processPR(githubToken, minEpoch) {
             core.debug(JSON.stringify(threadsToDelete));
             for (const thread of threadsToDelete) {
                 for (const comment of thread.node.comments.edges) {
-                    core.debug(`Deleting review comment ${comment.node.id}`);
+                    core.debug(`Deleting review comment ${comment.node.databaseId}`);
                     yield octokit.rest.pulls.deleteReviewComment({
                         owner: context.repo.owner,
                         repo: context.repo.repo,
-                        comment_id: comment.node.id
+                        comment_id: comment.node.databaseId
                     });
                 }
             }
@@ -197,7 +197,7 @@ function getReviewThreadList(octokit, pullNumber, cursor) {
                 comments(first:2){
                   edges{
                     node{
-                      id
+                      databaseId
                       author{
                         login
                       }

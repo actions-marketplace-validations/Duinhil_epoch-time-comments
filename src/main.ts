@@ -103,11 +103,11 @@ async function processPR(githubToken: string, minEpoch: number): Promise<void> {
 
     for (const thread of threadsToDelete) {
       for (const comment of thread.node.comments.edges) {
-        core.debug(`Deleting review comment ${comment.node.id}`)
+        core.debug(`Deleting review comment ${comment.node.databaseId}`)
         await octokit.rest.pulls.deleteReviewComment({
           owner: context.repo.owner,
           repo: context.repo.repo,
-          comment_id: comment.node.id
+          comment_id: comment.node.databaseId
         })
       }
     }
@@ -146,7 +146,7 @@ type ReviewThreadEdge = {
       edges: [
         {
           node: {
-            id: number
+            databaseId: number
             author: {
               login: string
             }
@@ -179,7 +179,7 @@ async function getReviewThreadList(
                 comments(first:2){
                   edges{
                     node{
-                      id
+                      databaseId
                       author{
                         login
                       }
