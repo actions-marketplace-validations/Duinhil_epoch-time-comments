@@ -13,6 +13,10 @@ inputs:
     description: 'The minimum number that will be identified as an epoch time for comments'
     default: 0
     required: false
+  maxLineLength:
+    description: 'The maximum line length to be considered for conversion'
+    default: 256
+    required: false
 runs:
   using: 'node16'
   main: 'dist/index.js'
