@@ -87,8 +87,8 @@ function commentCommits(octokit, context, minEpoch, maxLineLength) {
             const reviewIdsToClean = reviews
                 .filter(review => {
                 var _a;
-                return ((_a = review.user) === null || _a === void 0 ? void 0 : _a.login) === 'github-actions' &&
-                    review.state === 'COMMENT' &&
+                return ((_a = review.user) === null || _a === void 0 ? void 0 : _a.type) === 'Bot' &&
+                    review.state === 'COMMENTED' &&
                     review.body.startsWith('Commenting epoch timers');
             })
                 .map(review => review.id);

@@ -72,8 +72,8 @@ async function commentCommits(
     const reviewIdsToClean = reviews
       .filter(
         review =>
-          review.user?.login === 'github-actions' &&
-          review.state === 'COMMENT' &&
+          review.user?.type === 'Bot' &&
+          review.state === 'COMMENTED' &&
           review.body.startsWith('Commenting epoch timers')
       )
       .map(review => review.id)
