@@ -38,9 +38,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(2186));
 const github = __importStar(__nccwpck_require__(5438));
+const gitdiff_parser_1 = __importDefault(__nccwpck_require__(153));
+const util_1 = __nccwpck_require__(4024);
 function run() {
     return __awaiter(this, void 0, void 0, function* () {
         try {
@@ -48,8 +53,12 @@ function run() {
             const githubToken = core.getInput('GITHUB_TOKEN');
             const minEpochString = core.getInput('minEpoch');
             const minEpoch = minEpochString ? parseInt(minEpochString) : 0;
+            const maxLineLengthString = core.getInput('maxLineLength');
+            const maxLineLength = maxLineLengthString
+                ? parseInt(maxLineLengthString)
+                : 0;
             if (githubToken) {
-                yield processPR(githubToken, minEpoch);
+                yield processPR(githubToken, minEpoch, maxLineLength);
             }
         }
         catch (error) {
@@ -59,173 +68,127 @@ function run() {
         }
     });
 }
-function processPR(githubToken, minEpoch) {
+function processPR(githubToken, minEpoch, maxLineLength) {
     return __awaiter(this, void 0, void 0, function* () {
         const context = github.context;
         const octokit = github.getOctokit(githubToken);
-        yield deleteThreads(octokit, context, filterThreadsFromAuthor, {
-            author: 'github-actions'
-        });
-        yield commentCommits(octokit, context, minEpoch);
-        yield deleteThreads(octokit, context, filterOutdatedThreadsFromAuthor, {
-            author: 'github-actions'
-        });
+        yield commentCommits(octokit, context, minEpoch, maxLineLength);
     });
 }
-function commentCommits(octokit, context, minEpoch) {
+function commentCommits(octokit, context, minEpoch, maxLineLength) {
     var _a;
     return __awaiter(this, void 0, void 0, function* () {
-        function replaceEpochTimes(match) {
-            const epoch = parseInt(match);
-            if (epoch >= minEpoch) {
-                const date = new Date(0);
-                date.setUTCSeconds(epoch);
-                return date.toUTCString();
-            }
-            return match;
-        }
         if (context.payload.pull_request) {
-            const commitList = yield octokit.paginate(octokit.rest.pulls.listCommits, {
+            const reviews = yield octokit.paginate(octokit.rest.pulls.listReviews, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: context.payload.pull_request.number
             }, response => response.data);
-            const rawCommits = yield Promise.all(commitList.map((commit) => __awaiter(this, void 0, void 0, function* () {
-                return octokit.rest.repos.getCommit({
+            const reviewIdsToClean = reviews
+                .filter(review => {
+                var _a;
+                return ((_a = review.user) === null || _a === void 0 ? void 0 : _a.type) === 'Bot' &&
+                    review.state === 'COMMENTED' &&
+                    review.body.startsWith('Commenting epoch timers');
+            })
+                .map(review => review.id);
+            const reviewComments = yield octokit.paginate(octokit.rest.pulls.listReviewComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number
+            }, response => response.data);
+            const commentsToDelete = reviewComments
+                .filter(reviewComment => reviewComment.pull_request_review_id != null &&
+                reviewIdsToClean.includes(reviewComment.pull_request_review_id))
+                .map(reviewComment => reviewComment.id);
+            const commentDeletePromises = commentsToDelete.map((commentId) => __awaiter(this, void 0, void 0, function* () {
+                return octokit.rest.pulls.deleteReviewComment({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    ref: commit.sha
+                    comment_id: commentId
                 });
-            })));
-            const commits = rawCommits.map(rawCommit => rawCommit.data);
-            for (const commit of commits) {
-                if (commit.files) {
-                    for (const file of commit.files) {
-                        core.debug(`Processing ${file.filename}`);
-                        const lines = (_a = file.patch) === null || _a === void 0 ? void 0 : _a.split(/\r\n|\r|\n/);
-                        if (lines) {
-                            let rightLineNumber = 0;
-                            for (const line of lines) {
-                                core.debug(`Processing ${line}`);
-                                const lineNumbers = line.match(/@@ -(\d+),\d+ \+(\d+),\d+ @@/);
-                                if (lineNumbers) {
-                                    rightLineNumber = parseInt(lineNumbers[2]);
-                                }
-                                else if (line.startsWith('+')) {
-                                    let comment = line.replace(/\d+/g, replaceEpochTimes);
-                                    if (comment !== line) {
-                                        comment = comment.substring(1);
-                                        core.debug(`Posting review comment to ${file.filename} - RIGHT - ${rightLineNumber}`);
-                                        yield octokit.rest.pulls.createReviewComment({
-                                            owner: context.repo.owner,
-                                            repo: context.repo.repo,
-                                            pull_number: context.payload.pull_request.number,
-                                            body: comment,
-                                            path: file.filename,
-                                            line: rightLineNumber,
-                                            side: 'RIGHT',
-                                            commit_id: commit.sha
-                                        });
-                                    }
-                                    rightLineNumber++;
-                                }
-                                else if (!line.startsWith('-')) {
-                                    rightLineNumber++;
+            }));
+            const diffResponse = yield octokit.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: (_a = context.payload.pull_request) === null || _a === void 0 ? void 0 : _a.number,
+                headers: {
+                    accept: 'application/vnd.github.diff'
+                }
+            });
+            const diff = diffResponse.data;
+            if (typeof diff !== 'string') {
+                throw new Error('Unexpected type for diff');
+            }
+            const files = gitdiff_parser_1.default.parse(diff);
+            const comments = [];
+            for (const file of files) {
+                if (file.isBinary) {
+                    continue;
+                }
+                if (file.type === 'add' || file.type === 'modify') {
+                    for (const hunk of file.hunks) {
+                        for (const change of hunk.changes) {
+                            if (change.type === 'insert') {
+                                const commentBody = (0, util_1.ReplaceEpochTimes)(change.content, minEpoch, maxLineLength);
+                                if (commentBody !== change.content) {
+                                    const comment = {
+                                        path: file.newPath,
+                                        body: commentBody,
+                                        line: change.lineNumber,
+                                        side: 'RIGHT'
+                                    };
+                                    comments.push(comment);
                                 }
                             }
                         }
                     }
                 }
             }
-        }
-    });
-}
-function deleteThreads(octokit, context, filterFunction, params) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (context.payload.pull_request) {
-            const reviewThreads = yield getAllReviewThreadList(octokit, context.payload.pull_request.number);
-            core.debug(JSON.stringify(reviewThreads));
-            const threadsToDelete = reviewThreads.filter(reviewThread => filterFunction(reviewThread, params));
-            core.debug(JSON.stringify(threadsToDelete));
-            const promises = [];
-            for (const thread of threadsToDelete) {
-                for (const comment of thread.node.comments.edges) {
-                    core.debug(`Deleting review comment ${comment.node.databaseId}`);
-                    promises.push(octokit.rest.pulls.deleteReviewComment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        comment_id: comment.node.databaseId
-                    }));
-                }
+            if (comments.length > 0) {
+                core.debug('Posting review');
+                yield octokit.rest.pulls.createReview({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: context.payload.pull_request.number,
+                    body: 'Commenting epoch timers',
+                    event: 'COMMENT',
+                    comments
+                });
             }
-            yield Promise.all(promises);
+            core.debug('Deleting old comments');
+            yield Promise.all(commentDeletePromises);
         }
-    });
-}
-function filterThreadsFromAuthor(reviewThread, params) {
-    return reviewThread.node.comments.edges.every(edge => edge.node.author.login === params.author);
-}
-function filterOutdatedThreadsFromAuthor(reviewThread, params) {
-    return (reviewThread.node.isOutdated &&
-        filterThreadsFromAuthor(reviewThread, { author: params.author }));
-}
-function getAllReviewThreadList(octokit, pullNumber) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const { edges: reviewThreads, page_info } = yield getReviewThreadList(octokit, pullNumber, null);
-        if (page_info.hasNextPage) {
-            const res = yield getReviewThreadList(octokit, pullNumber, page_info.endCursor);
-            return [...reviewThreads, ...res.edges];
-        }
-        return reviewThreads;
-    });
-}
-function getReviewThreadList(octokit, pullNumber, cursor) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const query = `
-    query GetReviewThreadList($repo_owner:String!, $repo_name:String!, $pull_request_number:Int!, $next_cursor:String){
-      repository(owner:$repo_owner, name:$repo_name) {
-        id
-        pullRequest(number:$pull_request_number) {
-          id
-          reviewThreads(first:100, after: $next_cursor) {
-            pageInfo{
-              hasNextPage
-              endCursor
-            }
-            edges {
-              node {
-                comments(first:2){
-                  edges{
-                    node{
-                      databaseId
-                      author{
-                        login
-                      }
-                    }
-                  }
-                }
-                isOutdated
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-        const parameter = {
-            repo_owner: github.context.repo.owner,
-            repo_name: github.context.repo.repo,
-            pull_request_number: pullNumber,
-            next_cursor: cursor
-        };
-        const result = yield octokit.graphql(query, parameter);
-        return {
-            edges: result.repository.pullRequest.reviewThreads.edges,
-            page_info: result.repository.pullRequest.reviewThreads.pageInfo
-        };
     });
 }
 run();
+
+
+/***/ }),
+
+/***/ 4024:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ReplaceEpochTimes = void 0;
+function ReplaceEpochTimes(line, minEpoch, maxLineLength) {
+    function replaceEpochTimes(match) {
+        const epoch = parseInt(match);
+        if (epoch >= minEpoch) {
+            const date = new Date(0);
+            date.setUTCSeconds(epoch);
+            return date.toUTCString();
+        }
+        return match;
+    }
+    if (line.length <= maxLineLength) {
+        return line.replace(/\d+/g, replaceEpochTimes);
+    }
+    return line;
+}
+exports.ReplaceEpochTimes = ReplaceEpochTimes;
 
 
 /***/ }),
@@ -4778,6 +4741,264 @@ class Deprecation extends Error {
 }
 
 exports.Deprecation = Deprecation;
+
+
+/***/ }),
+
+/***/ 153:
+/***/ (function(module, exports) {
+
+/**
+ * @file gitdiff 消息解析器
+ * @author errorrik(errorrik@gmail.com)
+ */
+
+(function (root) {
+    var STAT_START = 2;
+    var STAT_FILE_META = 3;
+    var STAT_HUNK = 5;
+
+    function parsePathFromFirstLine(line) {
+        var filesStr = line.slice(11);
+        var oldPath = null;
+        var newPath = null;
+
+        var quoteIndex = filesStr.indexOf('"');
+        switch (quoteIndex) {
+            case -1:
+                var segs = filesStr.split(' ');
+                oldPath = segs[0].slice(2);
+                newPath = segs[1].slice(2);
+                break;
+
+            case 0:
+                var nextQuoteIndex = filesStr.indexOf('"', 2);
+                oldPath = filesStr.slice(3, nextQuoteIndex);
+                var newQuoteIndex = filesStr.indexOf('"', nextQuoteIndex + 1);
+                if (newQuoteIndex < 0) {
+                    newPath = filesStr.slice(nextQuoteIndex + 4);
+                }
+                else {
+                    newPath = filesStr.slice(newQuoteIndex + 3, -1);
+                }
+                break;
+
+            default:
+                var segs = filesStr.split(' ');
+                oldPath = segs[0].slice(2);
+                newPath = segs[1].slice(3, -1);
+                break;
+        }
+
+        return {
+            oldPath: oldPath,
+            newPath: newPath
+        };
+    }
+
+
+    var parser = {
+        /**
+         * 解析 gitdiff 消息
+         *
+         * @param {string} source gitdiff消息内容
+         * @return {Object}
+         */
+        parse: function (source) {
+            var infos = [];
+            var stat = STAT_START;
+            var currentInfo;
+            var currentHunk;
+            var changeOldLine;
+            var changeNewLine;
+            var paths;
+
+
+            var lines = source.split('\n');
+            var linesLen = lines.length;
+            var i = 0;
+
+            while (i < linesLen) {
+                var line = lines[i];
+
+                if (line.indexOf('diff --git') === 0) {
+                    // read file
+                    paths = parsePathFromFirstLine(line);
+                    currentInfo = {
+                        hunks: [],
+                        oldEndingNewLine: true,
+                        newEndingNewLine: true,
+                        oldPath: paths.oldPath,
+                        newPath: paths.newPath
+                    };
+
+                    infos.push(currentInfo);
+
+
+                    // 1. 如果oldPath是/dev/null就是add
+                    // 2. 如果newPath是/dev/null就是delete
+                    // 3. 如果有 rename from foo.js 这样的就是rename
+                    // 4. 如果有 copy from foo.js 这样的就是copy
+                    // 5. 其它情况是modify
+                    var currentInfoType = null;
+
+
+                    // read type and index
+                    var simiLine;
+                    simiLoop: while ((simiLine = lines[++i])) {
+                        var spaceIndex = simiLine.indexOf(' ');
+                        var infoType = spaceIndex > -1 ? simiLine.slice(0, spaceIndex) : infoType;
+
+                        switch (infoType) {
+                            case 'diff': // diff --git
+                                i--;
+                                break simiLoop;
+
+                            case 'deleted':
+                            case 'new':
+                                var leftStr = simiLine.slice(spaceIndex + 1);
+                                if (leftStr.indexOf('file mode') === 0) {
+                                    currentInfo[infoType === 'new' ? 'newMode' : 'oldMode'] = leftStr.slice(10);
+                                }
+                                break;
+
+                            case 'similarity':
+                                currentInfo.similarity = parseInt(simiLine.split(' ')[2], 10);
+                                break;
+
+                            case 'index':
+                                var segs = simiLine.slice(spaceIndex + 1).split(' ');
+                                var revs = segs[0].split('..');
+                                currentInfo.oldRevision = revs[0];
+                                currentInfo.newRevision = revs[1];
+
+                                if (segs[1]) {
+                                    currentInfo.oldMode = currentInfo.newMode = segs[1];
+                                }
+                                break;
+
+                            case 'copy':
+                            case 'rename':
+                                var infoStr = simiLine.slice(spaceIndex + 1);
+                                if (infoStr.indexOf('from') === 0) {
+                                    currentInfo.oldPath = infoStr.slice(5);
+                                }
+                                else { // rename to
+                                    currentInfo.newPath = infoStr.slice(3);
+                                }
+                                currentInfoType = infoType;
+                                break;
+
+                            case '---':
+                                var oldPath = simiLine.slice(spaceIndex + 1);
+                                var newPath = lines[++i].slice(4); // next line must be "+++ xxx"
+                                if (oldPath === '/dev/null') {
+                                    newPath = newPath.slice(2);
+                                    currentInfoType = 'add';
+                                }
+                                else if (newPath === '/dev/null') {
+                                    oldPath = oldPath.slice(2);
+                                    currentInfoType = 'delete';
+                                } else {
+                                    currentInfoType = 'modify';
+                                    oldPath = oldPath.slice(2);
+                                    newPath = newPath.slice(2);
+                                }
+
+                                if (oldPath) {
+                                    currentInfo.oldPath = oldPath;
+                                }
+                                if (newPath) {
+                                    currentInfo.newPath = newPath;
+                                }
+                                stat = STAT_HUNK;
+                                break simiLoop;
+                        }
+                    }
+
+                    currentInfo.type = currentInfoType || 'modify';
+                }
+                else if (line.indexOf('Binary') === 0) {
+                    currentInfo.isBinary = true;
+                    currentInfo.type = line.indexOf('/dev/null and') >= 0
+                        ? 'add'
+                        : (line.indexOf('and /dev/null') >= 0 ? 'delete' : 'modify');
+                    stat = STAT_START;
+                    currentInfo = null;
+                }
+                else if (stat === STAT_HUNK) {
+                    if (line.indexOf('@@') === 0) {
+                        var match = /^@@\s+-([0-9]+)(,([0-9]+))?\s+\+([0-9]+)(,([0-9]+))?/.exec(line)
+                        currentHunk = {
+                            content: line,
+                            oldStart: match[1] - 0,
+                            newStart: match[4] - 0,
+                            oldLines: match[3] - 0 || 1,
+                            newLines: match[6] - 0 || 1,
+                            changes: []
+                        };
+
+                        currentInfo.hunks.push(currentHunk);
+                        changeOldLine = currentHunk.oldStart;
+                        changeNewLine = currentHunk.newStart;
+                    }
+                    else {
+                        var typeChar = line.slice(0, 1);
+                        var change = {
+                            content: line.slice(1)
+                        };
+
+                        switch (typeChar) {
+                            case '+':
+                                change.type = 'insert';
+                                change.isInsert = true;
+                                change.lineNumber = changeNewLine;
+                                changeNewLine++;
+                                break;
+
+                            case '-':
+                                change.type = 'delete';
+                                change.isDelete = true;
+                                change.lineNumber = changeOldLine;
+                                changeOldLine++;
+                                break;
+
+                            case ' ':
+                                change.type = 'normal';
+                                change.isNormal = true;
+                                change.oldLineNumber = changeOldLine;
+                                change.newLineNumber = changeNewLine;
+                                changeOldLine++;
+                                changeNewLine++;
+                                break;
+
+                            case '\\': // Seems "no newline" is the only case starting with /
+                                var lastChange = currentHunk.changes[currentHunk.changes.length - 1];
+                                if (!lastChange.isDelete) {
+                                    currentInfo.newEndingNewLine = false;
+                                }
+                                if (!lastChange.isInsert) {
+                                    currentInfo.oldEndingNewLine = false;
+                                }
+                        }
+
+                        change.type && currentHunk.changes.push(change);
+                    }
+                }
+
+                i++;
+            }
+
+            return infos;
+        }
+    };
+
+    if (true) {
+        // For CommonJS
+        exports = module.exports = parser;
+    }
+    else {}
+})(this);
 
 
 /***/ }),
